@@ -732,3 +732,80 @@ fn modify_in_place_with_data() {
         assert_eq!(date.timepart(), 44746);
     }
 }
+
+fn read_all_from_stream(stream: &mut Cursor<Vec<u8>>) -> ZipResult<Vec<(String, Vec<u8>)>> {
+    use std::io::SeekFrom;
+    use zip::read::read_zipfile_from_stream;
+
+    stream.seek(SeekFrom::Start(0))?;
+    let mut streamed = Vec::new();
+    while let Some(mut file) = read_zipfile_from_stream(stream)? {
+        let name = file.name()?.into_owned();
+        let mut content = Vec::new();
+        file.read_to_end(&mut content)?;
+        streamed.push((name, content));
+    }
+    Ok(streamed)
+}
+
+#[test]
+fn new_append_shorter_comment_preserves_stream_readability() -> ZipResult<()> {
+    use zip::ZipArchive;
+
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    writer.set_comment("X".repeat(256))?;
+    writer.start_file("data.bin", stored)?;
+    writer.write_all(b"SOME_DATA")?;
+    let stream = writer.finish()?;
+
+    let mut writer = ZipWriter::new_append(stream)?;
+    writer.set_comment("")?;
+    let mut stream = writer.finish()?;
+
+    let mut archive = ZipArchive::new(Cursor::new(stream.get_ref()))?;
+    assert_eq!(archive.len(), 1);
+    assert_eq!(archive.comment(), b"");
+    assert_eq!(read_archive_file(&mut archive, "data.bin")?, "SOME_DATA");
+
+    assert_eq!(
+        read_all_from_stream(&mut stream)?,
+        vec![("data.bin".to_owned(), b"SOME_DATA".to_vec())]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn new_append_abort_file_preserves_stream_readability() -> ZipResult<()> {
+    use zip::ZipArchive;
+
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    writer.start_file("file1.txt", stored)?;
+    writer.write_all(b"first")?;
+    writer.start_file("file2.txt", stored)?;
+    writer.write_all(b"second")?;
+    let stream = writer.finish()?;
+
+    let mut writer = ZipWriter::new_append(stream)?;
+    writer.start_file("aborted.txt", stored)?;
+    writer.write_all(&[b'x'; 128])?;
+    writer.abort_file()?;
+    let mut stream = writer.finish()?;
+
+    let mut archive = ZipArchive::new(Cursor::new(stream.get_ref()))?;
+    assert_eq!(archive.len(), 2);
+    assert_eq!(read_archive_file(&mut archive, "file1.txt")?, "first");
+    assert_eq!(read_archive_file(&mut archive, "file2.txt")?, "second");
+
+    assert_eq!(
+        read_all_from_stream(&mut stream)?,
+        vec![
+            ("file1.txt".to_owned(), b"first".to_vec()),
+            ("file2.txt".to_owned(), b"second".to_vec()),
+        ]
+    );
+
+    Ok(())
+}
